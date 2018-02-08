@@ -241,6 +241,7 @@
 				depthTarget.depthTexture = new THREE.DepthTexture();
 				depthTarget.depthTexture.type = THREE.UnsignedShortType;
 
+				// This is used as a hack to get the depth of the pixels at the water surface by redrawing the scene with the water in the depth buffer
 				depthTarget2 = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
 				depthTarget2.texture.format = THREE.RGBFormat;
 				depthTarget2.texture.minFilter = THREE.NearestFilter;
@@ -251,6 +252,7 @@
 				depthTarget2.depthTexture = new THREE.DepthTexture();
 				depthTarget2.depthTexture.type = THREE.UnsignedShortType;
 
+				// Used to know which areas of the screen are udnerwater
 				maskTarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
 				maskTarget.texture.format = THREE.RGBFormat;
 				maskTarget.texture.minFilter = THREE.NearestFilter;
@@ -258,6 +260,7 @@
 				maskTarget.texture.generateMipmaps = false;
 				maskTarget.stencilBuffer = false;
 
+				// Used to apply the distortion effect
 				mainTarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
 				mainTarget.texture.format = THREE.RGBFormat;
 				mainTarget.texture.minFilter = THREE.NearestFilter;
@@ -265,6 +268,7 @@
 				mainTarget.texture.generateMipmaps = false;
 				mainTarget.stencilBuffer = false;
 
+				// Used to apply antialiasing 
 				AATarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
 				AATarget.texture.format = THREE.RGBFormat;
 				AATarget.texture.minFilter = THREE.NearestFilter;
