@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>Toon Water - Tuts+ Tutorial</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<style>
+			body {
+				margin: 0px;
+				overflow: hidden;
+			}
+
+		</style>
+	</head>
+
+	<body>
+		<script src="lib/three.min.js"></script>
+		<script src="lib/OBJLoader.js"></script>
+		<script src="lib/MTLLoader.js"></script>
+		<script src="lib/OrbitControls.js"></script>
+		<div id="container"></div>
+
+		<script>
+
+			var camera, controls, scene, renderer;
+			var postScene, postCamera;
+			var AAScene;
+			var water,depthTarget,depthTarget2,maskTarget,mainTarget, AATarget;
+
+			var mtlLoader = new THREE.MTLLoader();
+			var objLoader = new THREE.OBJLoader();
+
+			mtlLoader.setTexturePath('assets/textures/');
+			mtlLoader.setPath('assets/materials/');
+			objLoader.setPath('assets/models/');
+
+			var models = [
+				{'name':'Tugboat','pos':{x:0,y:-2,z:0}},
+				{'name':'Octopus','pos':{x:5,y:-5,z:5},'scale':0.2},
+				{'name':'Lighthouse','pos':{x:-7,y:-5,z:7},'scale':0.6},
+			]
+
+			var objects = {};
+
+			function LoadModels(models){
+				var model = models[0];
+				var material_file = model.name + '.mtl';
+				var object_file = model.name + '.obj';
+
+				mtlLoader.load(material_file,function(materials){
+					materials.preload();
+
+					objLoader.setMaterials(materials);
+
+					objLoader.load(object_file, function(object){
+						scene.add(object);
+
+						object.material = materials.materials[model.name + "_mat"];
+
+						object.material.color.r = 1;
+						object.material.color.g = 1;
+						object.material.color.b = 1;
+
+						objects[model.name] = object;
+
+						if(model.scale){
+							object.scale.set(model.scale,model.scale,model.scale);
+						}
+
+						object.position.set(model.pos.x,model.pos.y,model.pos.z);
+
+						var newModels = models.slice(1);
+						if(newModels.length != 0) LoadModels(newModels);
+					})
+				})
+			}
+
+			LoadModels(models);
+
+			function CreateWaterMesh(){
+				var vertShader = `
+				uniform float uTime;
+				varying vec2 vUV;
+				varying vec3 WorldPosition;
+
+				void main() {
+					vec3 pos = position;
+					pos.z += cos(pos.x*5.0+uTime) * 0.1 * sin(pos.y * 5.0 + uTime);
+					WorldPosition = pos;
+					vUV = uv;
+
+					//gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+					gl_Position = projectionMatrix * modelViewMatrix * vec4(pos,1.0);
+				}
+				`;
+				var fragShader = `
+				#include <packing>
+
+				varying vec2 vUV;
+				varying vec3 WorldPosition;
+
+				uniform sampler2D uSurfaceTexture;
+				uniform sampler2D uDepthMap;
+				uniform sampler2D uDepthMap2;
+				uniform float uTime;
+				uniform float cameraNear;
+				uniform float cameraFar;
+				uniform vec4 uScreenSize;
+				uniform bool isMask;
+
+				float readDepth (sampler2D depthSampler, vec2 coord) {
+					float fragCoordZ = texture2D(depthSampler, coord).x;
+					float viewZ = perspectiveDepthToViewZ( fragCoordZ, cameraNear, cameraFar );
+					return viewZToOrthographicDepth( viewZ, cameraNear, cameraFar );
+				}
+
+				float getLinearDepth(vec3 pos) {
+				    return -(viewMatrix * vec4(pos, 1.0)).z;
+				}
+
+				float getLinearScreenDepth(sampler2D map) {
+				    vec2 uv = gl_FragCoord.xy * uScreenSize.zw;
+				    return readDepth(map,uv);
+				}
+
+				void main(){
+					vec4 color = vec4(0.0,0.7,1.0,0.5);
+
+					vec2 pos = vUV * 2.0;
+    				pos.y -= uTime * 0.002;
+					vec4 WaterLines = texture2D(uSurfaceTexture,pos);
+					color.rgba += WaterLines.r * 0.1;
+
+					//float worldDepth = getLinearDepth(WorldPosition);
+					float worldDepth = getLinearScreenDepth(uDepthMap2);
+				    float screenDepth = getLinearScreenDepth(uDepthMap);
+				    float foamLine = clamp((screenDepth - worldDepth),0.0,1.0) ;
+
+				    if(foamLine < 0.001){
+				        color.rgba += 0.2;
+				    }
+
+				    if(isMask){
+				    	color = vec4(1.0);
+				    }
+
+					gl_FragColor = color;
+				}
+				`;
+
+				var waterLinesTexture = THREE.ImageUtils.loadTexture( 'assets/textures/WaterTexture.png' );
+				waterLinesTexture.wrapS = THREE.RepeatWrapping;
+				waterLinesTexture.wrapT = THREE.RepeatWrapping;
+
+				var uniforms = {
+						uTime: { value: 0.0 },
+						uSurfaceTexture: {type: "t", value:waterLinesTexture },
+						cameraNear: { value: camera.near },
+						cameraFar:  { value: camera.far },
+						uDepthMap:  { value: depthTarget.depthTexture },
+						uDepthMap2:  { value: depthTarget2.depthTexture },
+						isMask: { value: false },
+						uScreenSize: {value: new THREE.Vector4(window.innerWidth,window.innerHeight,1/window.innerWidth,1/window.innerHeight)}
+					};
+
+				var water_geometry = new THREE.PlaneGeometry( 50, 50, 50, 50 );
+				var water_material = new THREE.ShaderMaterial( {
+					uniforms: uniforms,
+					vertexShader: vertShader,
+					fragmentShader: fragShader,
+					transparent:true,
+					depthWrite:false
+				} );
+				var water = new THREE.Mesh( water_geometry, water_material );
+				water.rotation.x = -Math.PI/2;
+				water.position.y = -1;
+
+				water.uniforms = uniforms;
+				water.material = water_material;
+
+				return water;
+			}
+
+			init();
+			animate();
+
+			function init() {
+
+				scene = new THREE.Scene();
+				scene.background = new THREE.Color( 0x6CC8FFFF );
+
+				renderer = new THREE.WebGLRenderer({antialias:true});
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+				var container = document.getElementById( 'container' );
+				container.appendChild( renderer.domElement );
+
+				camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 1, 1000 );
+				camera.position.z = -10;
+				camera.position.x = 15;
+				camera.position.y = 5;
+
+				controls = new THREE.OrbitControls( camera, renderer.domElement );
+				controls.addEventListener( 'change', render ); // remove when using animation loop
+				
+
+				controls.enableZoom = true;
+
+				// Ground
+				var ground_geometry = new THREE.PlaneGeometry( 50, 50, 1 );
+				var ground_material = new THREE.MeshPhongMaterial( { color: 0xFFA457, shininess:0 } );
+				var ground = new THREE.Mesh( ground_geometry, ground_material );
+				ground.rotation.x = -Math.PI/2;
+				ground.position.y = -5;
+				scene.add( ground ); 
+
+				
+
+
+				// lights
+
+				var light = new THREE.DirectionalLight( 0xffffff );
+				light.position.set( 1, 1, -1 );
+				light.intensity = 0.7;
+				scene.add( light );
+
+				var light = new THREE.AmbientLight( 0xFFC480 );
+				scene.add( light );
+
+				window.addEventListener( 'resize', onWindowResize, false );
+
+				// Set up depth buffer 
+				depthTarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
+				depthTarget.texture.format = THREE.RGBFormat;
+				depthTarget.texture.minFilter = THREE.NearestFilter;
+				depthTarget.texture.magFilter = THREE.NearestFilter;
+				depthTarget.texture.generateMipmaps = false;
+				depthTarget.stencilBuffer = false;
+				depthTarget.depthBuffer = true;
+				depthTarget.depthTexture = new THREE.DepthTexture();
+				depthTarget.depthTexture.type = THREE.UnsignedShortType;
+
+				depthTarget2 = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
+				depthTarget2.texture.format = THREE.RGBFormat;
+				depthTarget2.texture.minFilter = THREE.NearestFilter;
+				depthTarget2.texture.magFilter = THREE.NearestFilter;
+				depthTarget2.texture.generateMipmaps = false;
+				depthTarget2.stencilBuffer = false;
+				depthTarget2.depthBuffer = true;
+				depthTarget2.depthTexture = new THREE.DepthTexture();
+				depthTarget2.depthTexture.type = THREE.UnsignedShortType;
+
+				maskTarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
+				maskTarget.texture.format = THREE.RGBFormat;
+				maskTarget.texture.minFilter = THREE.NearestFilter;
+				maskTarget.texture.magFilter = THREE.NearestFilter;
+				maskTarget.texture.generateMipmaps = false;
+				maskTarget.stencilBuffer = false;
+
+				mainTarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
+				mainTarget.texture.format = THREE.RGBFormat;
+				mainTarget.texture.minFilter = THREE.NearestFilter;
+				mainTarget.texture.magFilter = THREE.NearestFilter;
+				mainTarget.texture.generateMipmaps = false;
+				mainTarget.stencilBuffer = false;
+
+				AATarget = new THREE.WebGLRenderTarget( window.innerWidth, window.innerHeight );
+				AATarget.texture.format = THREE.RGBFormat;
+				AATarget.texture.minFilter = THREE.NearestFilter;
+				AATarget.texture.magFilter = THREE.NearestFilter;
+				AATarget.texture.generateMipmaps = false;
+				AATarget.stencilBuffer = false;
+
+				setupPost();
+				setupAAEffect();
+
+				// Water 
+				water = CreateWaterMesh();
+				scene.add( water ); 
+			}
+
+			function setupPost () {
+				var fragShader = `
+				varying vec2 vUv;
+				uniform sampler2D uColorBuffer;
+				uniform sampler2D uMaskBuffer;
+				uniform float uTime;
+
+				void main() {
+					vec2 pos = vUv;
+    
+				    float X = pos.x*15.+uTime*0.5;
+				    float Y = pos.y*15.+uTime*0.5;
+				    pos.y += cos(X+Y)*0.01*cos(Y);
+				    pos.x += sin(X-Y)*0.01*sin(Y);
+				    
+				    // Check original position as well as new distorted position
+				    vec4 maskColor = texture2D(uMaskBuffer, pos);
+				    vec4 maskColor2 = texture2D(uMaskBuffer, vUv);
+
+				    if(maskColor != vec4(1.0) || maskColor2 != vec4(1.0)){
+				        pos = vUv;
+				    }
+				    
+				    vec4 color = texture2D(uColorBuffer, pos);    
+				    gl_FragColor = color;
+				}
+				`;
+				var  vertexShader= `
+				varying vec2 vUv;
+
+				void main() {
+					vUv = uv;
+					gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+				}
+				`;
+
+				// Setup post processing stage
+				postCamera = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 );
+				var postMaterial = new THREE.ShaderMaterial( {
+					vertexShader: vertexShader,
+					fragmentShader: fragShader,
+					uniforms: {
+						uColorBuffer:   { value: mainTarget.texture },
+						uMaskBuffer:    { value: maskTarget.texture },
+						uTime: {value:0}
+					}
+				});
+				var postPlane = new THREE.PlaneBufferGeometry( 2, 2 );
+				var postQuad = new THREE.Mesh( postPlane, postMaterial );
+				postScene = new THREE.Scene();
+				postScene.add( postQuad );
+
+				postScene.postMaterial = postMaterial;
+			}
+
+			function setupAAEffect(){
+				var fragShader = `
+				#ifndef FXAA_REDUCE_MIN
+				    #define FXAA_REDUCE_MIN   (1.0/ 128.0)
+				#endif
+				#ifndef FXAA_REDUCE_MUL
+				    #define FXAA_REDUCE_MUL   (1.0 / 8.0)
+				#endif
+				#ifndef FXAA_SPAN_MAX
+				    #define FXAA_SPAN_MAX     8.0
+				#endif
+
+				// optimized version for mobile, where dependent 
+				// texture reads can be a bottleneck
+				vec4 fxaa(sampler2D tex, vec2 fragCoord, vec2 resolution,
+				            vec2 v_rgbNW, vec2 v_rgbNE, 
+				            vec2 v_rgbSW, vec2 v_rgbSE, 
+				            vec2 v_rgbM) {
+				    vec4 color;
+				    vec2 inverseVP = vec2(1.0 / resolution.x, 1.0 / resolution.y);
+				    vec3 rgbNW = texture2D(tex, v_rgbNW).xyz;
+				    vec3 rgbNE = texture2D(tex, v_rgbNE).xyz;
+				    vec3 rgbSW = texture2D(tex, v_rgbSW).xyz;
+				    vec3 rgbSE = texture2D(tex, v_rgbSE).xyz;
+				    vec4 texColor = texture2D(tex, v_rgbM);
+				    vec3 rgbM  = texColor.xyz;
+				    vec3 luma = vec3(0.299, 0.587, 0.114);
+				    float lumaNW = dot(rgbNW, luma);
+				    float lumaNE = dot(rgbNE, luma);
+				    float lumaSW = dot(rgbSW, luma);
+				    float lumaSE = dot(rgbSE, luma);
+				    float lumaM  = dot(rgbM,  luma);
+				    float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+				    float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+				    
+				    vec2 dir;
+				    dir.x = -((lumaNW + lumaNE) - (lumaSW + lumaSE));
+				    dir.y =  ((lumaNW + lumaSW) - (lumaNE + lumaSE));
+				    
+				    float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) *
+				                          (0.25 * FXAA_REDUCE_MUL), FXAA_REDUCE_MIN);
+				    
+				    float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+				    dir = min(vec2(FXAA_SPAN_MAX, FXAA_SPAN_MAX),
+				              max(vec2(-FXAA_SPAN_MAX, -FXAA_SPAN_MAX),
+				              dir * rcpDirMin)) * inverseVP;
+				    
+				    vec3 rgbA = 0.5 * (
+				        texture2D(tex, fragCoord * inverseVP + dir * (1.0 / 3.0 - 0.5)).xyz +
+				        texture2D(tex, fragCoord * inverseVP + dir * (2.0 / 3.0 - 0.5)).xyz);
+				    vec3 rgbB = rgbA * 0.5 + 0.25 * (
+				        texture2D(tex, fragCoord * inverseVP + dir * -0.5).xyz +
+				        texture2D(tex, fragCoord * inverseVP + dir * 0.5).xyz);
+
+				    float lumaB = dot(rgbB, luma);
+				    if ((lumaB < lumaMin) || (lumaB > lumaMax))
+				        color = vec4(rgbA, texColor.a);
+				    else
+				        color = vec4(rgbB, texColor.a);
+				    return color;
+				}
+
+				void texcoords(vec2 fragCoord, vec2 resolution,
+				            out vec2 v_rgbNW, out vec2 v_rgbNE,
+				            out vec2 v_rgbSW, out vec2 v_rgbSE,
+				            out vec2 v_rgbM) {
+				    vec2 inverseVP = 1.0 / resolution.xy;
+				    v_rgbNW = (fragCoord + vec2(-1.0, -1.0)) * inverseVP;
+				    v_rgbNE = (fragCoord + vec2(1.0, -1.0)) * inverseVP;
+				    v_rgbSW = (fragCoord + vec2(-1.0, 1.0)) * inverseVP;
+				    v_rgbSE = (fragCoord + vec2(1.0, 1.0)) * inverseVP;
+				    v_rgbM = vec2(fragCoord * inverseVP);
+				}
+
+				vec4 apply(sampler2D tex, vec2 fragCoord, vec2 resolution) {
+				    vec2 v_rgbNW;
+				    vec2 v_rgbNE;
+				    vec2 v_rgbSW;
+				    vec2 v_rgbSE;
+				    vec2 v_rgbM;
+
+				    // compute the texture coords
+				    texcoords(fragCoord, resolution, 
+				              v_rgbNW, v_rgbNE, v_rgbSW, v_rgbSE, v_rgbM);
+				    
+				    // compute FXAA
+				    return fxaa(tex, fragCoord, resolution, 
+				                v_rgbNW, v_rgbNE, v_rgbSW, v_rgbSE, v_rgbM);
+				}
+
+				uniform vec2 resolution;
+				uniform sampler2D dataTexture;
+				varying vec2 vUv;
+
+				void main() {
+				    vec2 fragCoord = vUv * resolution;
+				    gl_FragColor = apply(dataTexture, fragCoord, resolution);
+
+				}
+				`;
+
+				var vertexShader = `
+				varying vec2 vUv;
+
+				void main() {
+				    vUv = uv;
+				    gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+				}
+				`;
+
+				var AAMaterial = new THREE.ShaderMaterial( {
+					vertexShader: vertexShader,
+					fragmentShader: fragShader,
+					uniforms: {
+						dataTexture:   { value: AATarget.texture },
+						resolution: {value:new THREE.Vector2(window.innerWidth,window.innerHeight)}
+					}
+				});
+				var AAPlane = new THREE.PlaneBufferGeometry( 2, 2 );
+				var AAQuad = new THREE.Mesh( AAPlane, AAMaterial );
+				AAScene = new THREE.Scene();
+				AAScene.add( AAQuad );
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				water.uniforms.uScreenSize =  new THREE.Vector4(window.innerWidth,window.innerHeight,1/window.innerWidth,1/window.innerHeight);
+			}
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				controls.update(); // required if controls.enableDamping = true, or if controls.autoRotate = true
+				UpdateWater();
+				BuoyancyUpdate();
+
+				postScene.postMaterial.uniforms.uTime.value += 0.1;
+
+				render();
+
+			}
+
+			function UpdateWater(){
+				water.uniforms.uTime.value += 0.1;
+			}
+
+			function BuoyancyUpdate(){
+				var BuoyantObjects =  [objects['Tugboat']];
+
+				for(var i=0;i<BuoyantObjects.length;i++){
+					var obj = BuoyantObjects[i];
+					if(obj == undefined) continue;
+					if(obj.time == undefined){
+						obj.time = Math.random() * Math.PI * 2; 
+						obj.initialPosition = obj.position.clone();
+						obj.initialRotation = obj.rotation.clone();
+					}
+
+					obj.time += 0.05; 
+					// Move object up and down 
+					obj.position.y = obj.initialPosition.y + Math.cos(obj.time) * 0.07;
+
+					// Rotate object slightly 
+					obj.rotation.x = obj.initialRotation.x + Math.cos(obj.time * 0.25) * 0.02;
+					obj.rotation.z = obj.initialRotation.z + Math.sin(obj.time * 0.5) * 2 * 0.02;
+				}
+			}
+
+			function render() {
+				// Render the original scene
+				renderer.render( scene, camera, mainTarget );
+
+				// Render the water mask 
+				water.material.uniforms.isMask.value = true;
+				renderer.render( scene, camera, maskTarget);
+				water.material.uniforms.isMask.value = false;
+
+
+				// Render onto depth buffer 
+				water.material.depthWrite = false;
+				renderer.render( scene, camera, depthTarget );
+				water.material.depthWrite = true;
+				renderer.render( scene, camera, depthTarget2 );
+
+				// Render post process FX 
+				renderer.render( postScene, postCamera, AATarget );
+
+				// Final Anti-alias effect 
+				renderer.render( AAScene, postCamera );
+			}
+
+		</script>
+
+	</body>
+</html>
